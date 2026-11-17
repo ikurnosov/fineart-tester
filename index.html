@@ -131,7 +131,7 @@ html:has(#xr-ui:not([hidden])) .app{visibility:hidden}
 </div>
 
 <div id="xr-ui" hidden>
-  <div class="xr-top"><span class="xr-hint" id="xr-hint"></span><span class="xr-btns"><button class="act label" type="button" id="xr-exit">Close</button><button class="act label" type="button" id="xr-phone">Phone on wall</button></span></div>
+  <div class="xr-top"><span class="xr-hint" id="xr-hint"></span><span class="xr-btns"><button class="act label" type="button" id="xr-exit">Close</button><button class="act label" type="button" id="xr-reset">New wall</button></span></div>
   <div class="sheet xr-sheet" id="xr-sheet">
     <div class="row"><span class="label soft">Size</span><div class="opts" id="xr-sizes"></div></div>
     <div class="row"><span class="label soft">Frame</span><div class="opts" id="xr-frames"></div>
@@ -309,24 +309,39 @@ function rebuild(){
   if(old){pic.matrix.copy(old.matrix); scene.remove(old)}
   pic.visible=placed; scene.add(pic);
 }
-function place(){
-  if(!reticle.visible||!pic) return;
-  const m=reticle.matrix;
-  hang(new THREE.Vector3().setFromMatrixPosition(m), new THREE.Vector3().setFromMatrixColumn(m,1).normalize());
-}
-function placeAtPhone(){
-  if(!pic||!session) return;
-  const m=renderer.xr.getCamera().matrixWorld;
-  hang(new THREE.Vector3().setFromMatrixPosition(m), new THREE.Vector3().setFromMatrixColumn(m,2).normalize(), true);
-}
-function hang(pos,n,atPhone){
-  const cam=new THREE.Vector3().setFromMatrixPosition(renderer.xr.getCamera().matrixWorld);
-  if(!atPhone&&n.dot(cam.clone().sub(pos))<0) n.negate();
-  const top=Math.abs(n.y)<0.7?new THREE.Vector3(0,1,0):(atPhone?new THREE.Vector3().setFromMatrixColumn(renderer.xr.getCamera().matrixWorld,1):pos.clone().sub(cam));
-  top.sub(n.clone().multiplyScalar(top.dot(n))).normalize();
+const UP=new THREE.Vector3(0,1,0);
+let base=[], wall=null, aiming=false;
+function camPos(){return new THREE.Vector3().setFromMatrixPosition(renderer.xr.getCamera().matrixWorld)}
+function hang(pos,n){
+  const top=UP.clone().sub(n.clone().multiplyScalar(UP.dot(n))).normalize();
   const X=new THREE.Vector3().crossVectors(top,n).normalize(), Z=top.clone().negate();
   pic.matrix.makeBasis(X,n,Z).setPosition(pos); pic.visible=true; placed=true;
-  hint.textContent=atPhone?'Step back and look. Sizes and frames change below.':'Tap again to move it. Sizes and frames change below.';
+}
+function aimOnWall(){
+  const m=renderer.xr.getCamera().matrixWorld, c=camPos(), d=new THREE.Vector3().setFromMatrixColumn(m,2).normalize().negate();
+  const den=d.dot(wall.n); if(Math.abs(den)<1e-4) return false;
+  const t=wall.p.clone().sub(c).dot(wall.n)/den; if(t<0.3||t>15) return false;
+  hang(c.add(d.multiplyScalar(t)),wall.n); return true;
+}
+function resetWall(){base=[]; wall=null; aiming=false; placed=false; seen=false; if(pic) pic.visible=false;
+  hint.textContent='Step back. Aim the ring at the floor right where it meets the wall and tap. A textured wall also works: aim at the wall itself.'}
+function place(){
+  if(!pic) return;
+  if(wall){ if(aiming){ if(aimOnWall()){aiming=false; hint.textContent='Fixed. Tap to move it again. Sizes and frames change below.'} } else {aiming=true; hint.textContent='Point the phone where the print should hang and tap to fix it.'} return }
+  if(!reticle.visible) return;
+  const m=reticle.matrix, pos=new THREE.Vector3().setFromMatrixPosition(m), n=new THREE.Vector3().setFromMatrixColumn(m,1).normalize();
+  if(Math.abs(n.y)<0.7){            // the ring is on a vertical surface: hang right there
+    n.y=0; n.normalize(); if(n.dot(camPos().sub(pos))<0) n.negate();
+    hang(pos,n); wall={p:pos.clone(),n:n.clone()}; aiming=false;
+    hint.textContent='Tap to move it along this wall. Sizes and frames change below.'; return;
+  }
+  if(base.length&&pos.clone().setY(0).distanceTo(base[0].clone().setY(0))<0.3){hint.textContent='Too close to the first point. Tap the floor line a step further along the wall.';return}
+  base.push(pos);
+  if(base.length===1){hint.textContent='First point set. Now aim at the same floor line a step to the side and tap.';return}
+  const along=base[1].clone().sub(base[0]).setY(0).normalize(), n2=new THREE.Vector3().crossVectors(UP,along).normalize();
+  if(n2.dot(camPos().sub(base[0]))<0) n2.negate();
+  wall={p:base[0].clone(),n:n2}; aiming=true;
+  hint.textContent='Wall set. Point the phone where the print should hang and tap to fix it.';
 }
 function init(){
   renderer=new THREE.WebGLRenderer({alpha:true,antialias:true}); renderer.setPixelRatio(window.devicePixelRatio); renderer.setSize(innerWidth,innerHeight);
@@ -348,22 +363,20 @@ btn.addEventListener('click',async()=>{
     await renderer.xr.setSession(session);
     const viewer=await session.requestReferenceSpace('viewer');
     hitSource=await session.requestHitTestSource({space:viewer});
-    placed=false; rebuild(); W.say('');
-    hint.textContent='Move the phone slowly along the wall. When the ring appears, tap to hang the print.';
+    rebuild(); W.say(''); resetWall();
     session.addEventListener('select',place);
-    session.addEventListener('end',()=>{ui.hidden=true; hitSource=null; session=null; placed=false; renderer.setAnimationLoop(null)});
+    session.addEventListener('end',()=>{ui.hidden=true; hitSource=null; session=null; placed=false; wall=null; base=[]; aiming=false; renderer.setAnimationLoop(null)});
     renderer.setAnimationLoop((t,frame)=>{
       try{
         if(frame&&hitSource){
           const hits=frame.getHitTestResults(hitSource), ref=renderer.xr.getReferenceSpace();
           const pose=hits.length?hits[0].getPose(ref):null;
           if(pose){reticle.visible=true; reticle.matrix.fromArray(pose.transform.matrix);
-            if(!seen&&!placed){seen=true; hint.textContent='Surface found. Tap the screen to hang the print on the ring.'}
           } else reticle.visible=false;
+          if(wall){reticle.visible=false; if(aiming) aimOnWall()}
         }
         renderer.render(scene,camera);
         frames++;
-        if(frames===600&&!seen&&!placed) hint.textContent='No surface found yet. Plain walls are hard to detect. Hold the phone flat against the wall and tap “Phone on wall”.';
       }catch(err){hint.textContent='AR error: '+(err&&err.message?err.message:err)}
     });
   }catch(err){
@@ -372,7 +385,7 @@ btn.addEventListener('click',async()=>{
 });
 ui.addEventListener('beforexrselect',e=>e.preventDefault());
 document.getElementById('xr-exit').addEventListener('click',()=>{if(session) session.end()});
-document.getElementById('xr-phone').addEventListener('click',placeAtPhone);
+document.getElementById('xr-reset').addEventListener('click',resetWall);
 document.addEventListener('wall-change',rebuild);
 </script>
 </body>
