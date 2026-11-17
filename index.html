@@ -67,10 +67,15 @@ header{display:flex;justify-content:space-between;align-items:baseline;gap:12px;
 .calbox p{flex:1 1 100%;margin:0;color:var(--soft)}
 .calbox input{width:92px;background:transparent;border:0;border-bottom:1px solid var(--ink);padding:6px 0;border-radius:0}
 .msg{margin:0;color:var(--soft)}
+html:has(#xr-ui:not([hidden])),html:has(#xr-ui:not([hidden])) body{background:transparent!important}
+html:has(#xr-ui:not([hidden])) .app{visibility:hidden}
+#xr-ui::backdrop{background:transparent}
 #xr-ui{position:fixed;inset:0;display:flex;flex-direction:column;justify-content:space-between;pointer-events:none;background:transparent}
 #xr-ui > *{pointer-events:auto}
 .xr-top{display:flex;justify-content:space-between;align-items:flex-start;gap:12px;padding:max(14px, env(safe-area-inset-top, 0px)) 16px 0}
 .xr-top .act{background:rgba(14,14,14,.7);min-height:40px;padding:6px 16px}
+
+.xr-btns{display:grid;gap:8px;flex:0 0 auto}
 .xr-hint{background:rgba(14,14,14,.7);padding:8px 12px;max-width:70%}
 .xr-sheet{background:rgba(21,21,20,.82)}
 .vh{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0)}
@@ -126,7 +131,7 @@ header{display:flex;justify-content:space-between;align-items:baseline;gap:12px;
 </div>
 
 <div id="xr-ui" hidden>
-  <div class="xr-top"><span class="xr-hint" id="xr-hint"></span><button class="act label" type="button" id="xr-exit">Close</button></div>
+  <div class="xr-top"><span class="xr-hint" id="xr-hint"></span><span class="xr-btns"><button class="act label" type="button" id="xr-exit">Close</button><button class="act label" type="button" id="xr-phone">Phone on wall</button></span></div>
   <div class="sheet xr-sheet" id="xr-sheet">
     <div class="row"><span class="label soft">Size</span><div class="opts" id="xr-sizes"></div></div>
     <div class="row"><span class="label soft">Frame</span><div class="opts" id="xr-frames"></div>
@@ -268,7 +273,7 @@ $('b-save').onclick=()=>{
   },'image/png');
 };
 
-window.__wall={S,dims,FRAMES,art:()=>artImg,render,say};
+window.__wall={S,dims,FRAMES,art:()=>artImg,render,say,stopCam};
 $('xr-sizes').innerHTML=SIZES.map(s=>`<button class="chip" type="button" data-size="${s.id}">${s.h} × ${s.w}</button>`).join('')+`<button class="chip" type="button" id="xr-rot" aria-pressed="false">Portrait</button>`;
 $('xr-frames').innerHTML=FRAMES.map(f=>`<button class="sw ${f.id}" type="button" data-frame="${f.id}" aria-label="${f.name}"></button>`).join('');
 $('xr-sheet').addEventListener('click',e=>{const b=e.target.closest('button'); if(!b) return;
@@ -280,7 +285,7 @@ addEventListener('resize',render); render();
 <script type="module">
 import * as THREE from './three.module.min.js';
 const W=window.__wall, btn=document.getElementById('b-ar'), ui=document.getElementById('xr-ui'), hint=document.getElementById('xr-hint');
-let supported=false, renderer, scene, reticle, pic=null, session=null, hitSource=null, placed=false;
+let frames=0, seen=false, supported=false, renderer, scene, reticle, pic=null, session=null, hitSource=null, placed=false;
 if(navigator.xr&&navigator.xr.isSessionSupported) navigator.xr.isSessionSupported('immersive-ar').then(v=>{supported=v}).catch(()=>{});
 
 function artTexture(w,h){
@@ -306,14 +311,22 @@ function rebuild(){
 }
 function place(){
   if(!reticle.visible||!pic) return;
-  const m=reticle.matrix, pos=new THREE.Vector3().setFromMatrixPosition(m), n=new THREE.Vector3().setFromMatrixColumn(m,1).normalize();
+  const m=reticle.matrix;
+  hang(new THREE.Vector3().setFromMatrixPosition(m), new THREE.Vector3().setFromMatrixColumn(m,1).normalize());
+}
+function placeAtPhone(){
+  if(!pic||!session) return;
+  const m=renderer.xr.getCamera().matrixWorld;
+  hang(new THREE.Vector3().setFromMatrixPosition(m), new THREE.Vector3().setFromMatrixColumn(m,2).normalize(), true);
+}
+function hang(pos,n,atPhone){
   const cam=new THREE.Vector3().setFromMatrixPosition(renderer.xr.getCamera().matrixWorld);
-  if(n.dot(cam.clone().sub(pos))<0) n.negate();
-  const top=Math.abs(n.y)<0.7?new THREE.Vector3(0,1,0):pos.clone().sub(cam);
+  if(!atPhone&&n.dot(cam.clone().sub(pos))<0) n.negate();
+  const top=Math.abs(n.y)<0.7?new THREE.Vector3(0,1,0):(atPhone?new THREE.Vector3().setFromMatrixColumn(renderer.xr.getCamera().matrixWorld,1):pos.clone().sub(cam));
   top.sub(n.clone().multiplyScalar(top.dot(n))).normalize();
   const X=new THREE.Vector3().crossVectors(top,n).normalize(), Z=top.clone().negate();
   pic.matrix.makeBasis(X,n,Z).setPosition(pos); pic.visible=true; placed=true;
-  hint.textContent='Tap again to move it. Sizes and frames change below.';
+  hint.textContent=atPhone?'Step back and look. Sizes and frames change below.':'Tap again to move it. Sizes and frames change below.';
 }
 function init(){
   renderer=new THREE.WebGLRenderer({alpha:true,antialias:true}); renderer.setPixelRatio(window.devicePixelRatio); renderer.setSize(innerWidth,innerHeight);
@@ -327,8 +340,9 @@ const camera=new THREE.PerspectiveCamera(70,1,.01,30);
 btn.addEventListener('click',async()=>{
   if(!supported){W.say('AR is not available in this browser. It needs Chrome on an Android phone with Google Play Services for AR. You can still use Camera or Photo below.');return}
   try{
+    W.stopCam();
     if(!renderer) init();
-    ui.hidden=false;
+    ui.hidden=false; frames=0; seen=false;
     session=await navigator.xr.requestSession('immersive-ar',{requiredFeatures:['hit-test'],optionalFeatures:['dom-overlay'],domOverlay:{root:ui}});
     renderer.xr.setReferenceSpaceType('local');
     await renderer.xr.setSession(session);
@@ -339,12 +353,18 @@ btn.addEventListener('click',async()=>{
     session.addEventListener('select',place);
     session.addEventListener('end',()=>{ui.hidden=true; hitSource=null; session=null; placed=false; renderer.setAnimationLoop(null)});
     renderer.setAnimationLoop((t,frame)=>{
-      if(frame&&hitSource){
-        const hits=frame.getHitTestResults(hitSource), ref=renderer.xr.getReferenceSpace();
-        const pose=hits.length?hits[0].getPose(ref):null;
-        if(pose){reticle.visible=true; reticle.matrix.fromArray(pose.transform.matrix)} else reticle.visible=false;
-      }
-      renderer.render(scene,camera);
+      try{
+        if(frame&&hitSource){
+          const hits=frame.getHitTestResults(hitSource), ref=renderer.xr.getReferenceSpace();
+          const pose=hits.length?hits[0].getPose(ref):null;
+          if(pose){reticle.visible=true; reticle.matrix.fromArray(pose.transform.matrix);
+            if(!seen&&!placed){seen=true; hint.textContent='Surface found. Tap the screen to hang the print on the ring.'}
+          } else reticle.visible=false;
+        }
+        renderer.render(scene,camera);
+        frames++;
+        if(frames===600&&!seen&&!placed) hint.textContent='No surface found yet. Plain walls are hard to detect. Hold the phone flat against the wall and tap “Phone on wall”.';
+      }catch(err){hint.textContent='AR error: '+(err&&err.message?err.message:err)}
     });
   }catch(err){
     ui.hidden=true; W.say('AR could not start: '+(err&&err.message?err.message:'unknown error')+'. You can still use Camera or Photo below.');
@@ -352,6 +372,7 @@ btn.addEventListener('click',async()=>{
 });
 ui.addEventListener('beforexrselect',e=>e.preventDefault());
 document.getElementById('xr-exit').addEventListener('click',()=>{if(session) session.end()});
+document.getElementById('xr-phone').addEventListener('click',placeAtPhone);
 document.addEventListener('wall-change',rebuild);
 </script>
 </body>
