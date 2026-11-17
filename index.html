@@ -78,6 +78,8 @@ html:has(#xr-ui:not([hidden])) .app{visibility:hidden}
 .xr-btns{display:grid;gap:8px;flex:0 0 auto}
 .xr-hint{background:rgba(14,14,14,.7);padding:8px 12px;max-width:70%}
 .xr-sheet{background:rgba(21,21,20,.82)}
+.xr-len{font-size:30px;font-weight:300;letter-spacing:.02em}
+.act:disabled{opacity:.4;cursor:default}
 .vh{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0)}
 </style>
 
@@ -111,10 +113,11 @@ html:has(#xr-ui:not([hidden])) .app{visibility:hidden}
       <div class="opts"><button class="chip" type="button" id="mat-toggle" aria-pressed="true">Mat</button></div>
     </div>
     <div class="calbox" id="calbox" hidden>
-      <p>Put the two marks on the ends of something whose size you know. An A4 sheet held against the wall is 29.7 cm long.</p>
+      <p>Put the two marks on the ends of something whose size you know. An A4 sheet held against the wall is 29.7 cm long. No tape measure at hand? Measure a piece of furniture with the phone.</p>
       <label class="label soft" for="cal-len">Length, cm</label>
       <input id="cal-len" type="number" inputmode="decimal" min="1" step="0.1" value="29.7">
       <button class="chip" type="button" id="cal-apply" aria-pressed="true">Apply</button>
+      <button class="chip" type="button" id="cal-measure" aria-pressed="true">Measure with AR</button>
     </div>
     <p class="msg" id="msg" hidden></p>
     <div class="acts">
@@ -136,6 +139,10 @@ html:has(#xr-ui:not([hidden])) .app{visibility:hidden}
     <div class="row"><span class="label soft">Size</span><div class="opts" id="xr-sizes"></div></div>
     <div class="row"><span class="label soft">Frame</span><div class="opts" id="xr-frames"></div>
       <div class="opts"><button class="chip" type="button" id="xr-mat" aria-pressed="true">Mat</button></div></div>
+  </div>
+  <div class="sheet xr-sheet" id="xr-measure" hidden>
+    <div class="row"><span class="label soft">Length</span><span class="xr-len" id="xr-len">–</span></div>
+    <button class="act label primary" type="button" id="xr-use" disabled>Use this length</button>
   </div>
 </div>
 
@@ -343,6 +350,22 @@ function place(){
   wall={p:base[0].clone(),n:n2}; aiming=true;
   hint.textContent='Wall set. Point the phone where the print should hang and tap to fix it.';
 }
+/* tape measure: two taps, distance between them */
+let mode='wall', mA=null, mB=null, mLen=0, dotA, dotB, rule;
+const lenEl=document.getElementById('xr-len'), useBtn=document.getElementById('xr-use');
+function showLen(m){mLen=m; lenEl.textContent=m?(m*100).toFixed(1)+' cm':'–'}
+function setRule(a,b){const p=rule.geometry.attributes.position; p.setXYZ(0,a.x,a.y,a.z); p.setXYZ(1,b.x,b.y,b.z); p.needsUpdate=true; rule.visible=true}
+function resetMeasure(){mA=null; mB=null; showLen(0); useBtn.disabled=true; dotA.visible=dotB.visible=rule.visible=false;
+  hint.textContent='Aim the ring at one end of the object and tap. Edges of furniture and the floor work best; plain white surfaces may not be picked up.'}
+function measureTap(){
+  if(mA&&mB){resetMeasure(); return}
+  if(!reticle.visible) return;
+  const pos=new THREE.Vector3().setFromMatrixPosition(reticle.matrix);
+  if(!mA){mA=pos; dotA.position.copy(pos); dotA.visible=true; hint.textContent='Now aim at the other end and tap.'; return}
+  if(pos.distanceTo(mA)<0.02) return;
+  mB=pos; dotB.position.copy(pos); dotB.visible=true; setRule(mA,mB); showLen(mA.distanceTo(mB)); useBtn.disabled=false;
+  hint.textContent='Measured. Tap “Use this length”, or tap anywhere to measure again.';
+}
 function init(){
   renderer=new THREE.WebGLRenderer({alpha:true,antialias:true}); renderer.setPixelRatio(window.devicePixelRatio); renderer.setSize(innerWidth,innerHeight);
   renderer.xr.enabled=true; renderer.domElement.style.cssText='position:fixed;inset:0;display:none';
@@ -350,21 +373,28 @@ function init(){
   scene=new THREE.Scene(); scene.add(new THREE.HemisphereLight(0xffffff,0x8a8a8a,2.4));
   reticle=new THREE.Mesh(new THREE.RingGeometry(.07,.085,40).rotateX(-Math.PI/2),new THREE.MeshBasicMaterial({color:0xffffff}));
   reticle.matrixAutoUpdate=false; reticle.visible=false; scene.add(reticle);
+  const dm=new THREE.MeshBasicMaterial({color:0xffffff});
+  dotA=new THREE.Mesh(new THREE.SphereGeometry(.012,16,12),dm); dotB=dotA.clone();
+  rule=new THREE.Line(new THREE.BufferGeometry().setAttribute('position',new THREE.BufferAttribute(new Float32Array(6),3)),new THREE.LineBasicMaterial({color:0xffffff}));
+  rule.frustumCulled=false; dotA.visible=dotB.visible=rule.visible=false; scene.add(dotA,dotB,rule);
 }
 const camera=new THREE.PerspectiveCamera(70,1,.01,30);
-btn.addEventListener('click',async()=>{
-  if(!supported){W.say('AR is not available in this browser. It needs Chrome on an Android phone with Google Play Services for AR. You can still use Camera or Photo below.');return}
+async function start(m){
+  if(!supported){W.say(m==='wall'?'AR is not available in this browser. It needs Chrome on an Android phone with Google Play Services for AR. You can still use Camera or Photo below.':'Measuring with the phone needs Chrome on an Android phone with Google Play Services for AR. Enter the length by hand instead.');return}
   try{
     W.stopCam();
     if(!renderer) init();
-    ui.hidden=false; frames=0; seen=false;
+    mode=m; ui.hidden=false; frames=0; seen=false;
+    document.getElementById('xr-sheet').hidden=mode!=='wall'; document.getElementById('xr-measure').hidden=mode!=='measure';
+    document.getElementById('xr-reset').textContent=mode==='wall'?'New wall':'Again';
     session=await navigator.xr.requestSession('immersive-ar',{requiredFeatures:['hit-test'],optionalFeatures:['dom-overlay'],domOverlay:{root:ui}});
     renderer.xr.setReferenceSpaceType('local');
     await renderer.xr.setSession(session);
     const viewer=await session.requestReferenceSpace('viewer');
     hitSource=await session.requestHitTestSource({space:viewer});
-    rebuild(); W.say(''); resetWall();
-    session.addEventListener('select',place);
+    rebuild(); W.say('');
+    if(mode==='wall'){resetWall(); dotA.visible=dotB.visible=rule.visible=false} else {placed=false; if(pic) pic.visible=false; resetMeasure()}
+    session.addEventListener('select',()=>mode==='wall'?place():measureTap());
     session.addEventListener('end',()=>{ui.hidden=true; hitSource=null; session=null; placed=false; wall=null; base=[]; aiming=false; renderer.setAnimationLoop(null)});
     renderer.setAnimationLoop((t,frame)=>{
       try{
@@ -373,7 +403,8 @@ btn.addEventListener('click',async()=>{
           const pose=hits.length?hits[0].getPose(ref):null;
           if(pose){reticle.visible=true; reticle.matrix.fromArray(pose.transform.matrix);
           } else reticle.visible=false;
-          if(wall){reticle.visible=false; if(aiming) aimOnWall()}
+          if(mode==='wall'){ if(wall){reticle.visible=false; if(aiming) aimOnWall()} }
+          else if(mA&&!mB&&reticle.visible){const q=new THREE.Vector3().setFromMatrixPosition(reticle.matrix); setRule(mA,q); showLen(mA.distanceTo(q))}
         }
         renderer.render(scene,camera);
         frames++;
@@ -382,10 +413,17 @@ btn.addEventListener('click',async()=>{
   }catch(err){
     ui.hidden=true; W.say('AR could not start: '+(err&&err.message?err.message:'unknown error')+'. You can still use Camera or Photo below.');
   }
+}
+btn.addEventListener('click',()=>start('wall'));
+document.getElementById('cal-measure').addEventListener('click',()=>start('measure'));
+useBtn.addEventListener('click',()=>{
+  if(!mLen) return; const cm=(mLen*100).toFixed(1);
+  document.getElementById('cal-len').value=cm; if(session) session.end();
+  W.say('Measured '+cm+' cm. Put the two marks on the ends of the same object and tap Apply.');
 });
 ui.addEventListener('beforexrselect',e=>e.preventDefault());
 document.getElementById('xr-exit').addEventListener('click',()=>{if(session) session.end()});
-document.getElementById('xr-reset').addEventListener('click',resetWall);
+document.getElementById('xr-reset').addEventListener('click',()=>mode==='wall'?resetWall():resetMeasure());
 document.addEventListener('wall-change',rebuild);
 </script>
 </body>
